@@ -6,12 +6,10 @@ Verifica que la pasarela de pago del predial no haya sido suplantada.
 
 Además:
 - Guarda screenshots localmente
-- Sube screenshots a Google Drive
 - Guarda logs localmente
-- Sube logs a Google Drive
 
-Estructura en Drive:
-  Predial Logs/
+Estructura local:
+  predial/
     screenshots/
     logs/
 
@@ -29,8 +27,8 @@ import logging
 import smtplib
 import argparse
 import traceback
-import mimetypes
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
@@ -46,6 +44,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     WebDriverException,
 )
+from selenium.webdriver.chrome.service import Service
 
 # ──────────────────────────────────────────────────────────────────────────────
 # COLORES ANSI
@@ -123,7 +122,6 @@ EXPECTED_GATEWAY_DOMAIN = os.getenv(
 )
 
 URL_LOGIN = "https://pagos.tijuana.gob.mx/PagosEnLinea/index.aspx"
-URL_PREDIAL = "https://pagos.tijuana.gob.mx/predialTj/Default.aspx"
 
 PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", "60"))
 LOOP_INTERVAL_BUSINESS = int(os.getenv("LOOP_INTERVAL_BUSINESS", "600"))
@@ -131,6 +129,9 @@ LOOP_INTERVAL_OFF = int(os.getenv("LOOP_INTERVAL_OFF", "3600"))
 BUSINESS_HOUR_START = int(os.getenv("BUSINESS_HOUR_START", "8"))
 BUSINESS_HOUR_END = int(os.getenv("BUSINESS_HOUR_END", "17"))
 
+CLAVES_TIMEOUT = int(os.getenv("CLAVES_TIMEOUT", "120"))
+
+IS_DOCKER = os.path.exists("/.dockerenv")
 IS_RAILWAY = os.getenv("RAILWAY_ENVIRONMENT") is not None
 
 _log_filename = os.getenv("LOG_FILE", "monitor.log")
@@ -138,14 +139,20 @@ if _log_filename.startswith("/"):
     _log_filename = Path(_log_filename).name
 LOG_FILE = LOGS_DIR / _log_filename
 
+TZ = ZoneInfo("America/Tijuana")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HORARIO
 # ──────────────────────────────────────────────────────────────────────────────
+def now_local() -> datetime:
+    """Fecha/hora actual en zona horaria de Tijuana."""
+    return datetime.now(TZ)
+
 
 def is_business_hours() -> bool:
     """Devuelve True si ahora es lunes-viernes entre las horas configuradas."""
-    now = datetime.now()
+    now = now_local()
     return now.weekday() < 5 and BUSINESS_HOUR_START <= now.hour < BUSINESS_HOUR_END
 
 
@@ -154,9 +161,19 @@ def current_interval() -> int:
     return LOOP_INTERVAL_BUSINESS if is_business_hours() else LOOP_INTERVAL_OFF
 
 
+class TijuanaFileFormatter(logging.Formatter):
+    """Formatter para archivo usando zona horaria de Tijuana."""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat()
+
 # ──────────────────────────────────────────────────────────────────────────────
 # LOGGER
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class ColorFormatter(logging.Formatter):
     """Formatter con colores ANSI para la salida en consola."""
@@ -171,7 +188,7 @@ class ColorFormatter(logging.Formatter):
 
     def format(self, record):
         color = self.LEVEL_COLORS.get(record.levelno, C.RESET)
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = now_local().strftime("%H:%M:%S")
         level = f"{record.levelname:<8}"
         return f"{colorize(C.GRAY, ts)} {colorize(color, level)} {record.getMessage()}"
 
@@ -188,7 +205,7 @@ def setup_logger() -> logging.Logger:
     logger.addHandler(console_handler)
 
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter(
+    file_handler.setFormatter(TijuanaFileFormatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
@@ -234,10 +251,16 @@ def print_config_summary(log: logging.Logger):
         C.WHITE, SMTP_USER or "⚠️  no configurado (sin alertas)"))
     log.info("  Alertas a     : %s", colorize(
         C.WHITE, ALERT_TO or "⚠️  no configurado"))
+    log.info("  Zona horaria  : %s", colorize(C.CYAN, "America/Tijuana"))
     log.info("  Horario       : %s  → cada %ds / fuera: cada %ds",
              colorize(C.CYAN, bh), LOOP_INTERVAL_BUSINESS, LOOP_INTERVAL_OFF)
-    log.info("  Entorno       : %s", colorize(
-        C.CYAN, "Railway ☁️" if IS_RAILWAY else "Local 💻"))
+    if IS_RAILWAY:
+        env_label = "Railway ☁️"
+    elif IS_DOCKER:
+        env_label = "Docker 🐳"
+    else:
+        env_label = "Local 💻"
+    log.info("  Entorno       : %s", colorize(C.CYAN, env_label))
     log.info("  Storage local : %s", colorize(C.GRAY, str(LOCAL_STORAGE_DIR)))
     log.info("  Screenshots   : %s", colorize(C.GRAY, str(SCREENSHOTS_DIR)))
     log.info("  Log           : %s", colorize(C.GRAY, str(LOG_FILE)))
@@ -249,50 +272,121 @@ def print_config_summary(log: logging.Logger):
 
 def create_driver(visible: bool = False) -> webdriver.Chrome:
     """
+
     Crea ChromeDriver adaptado al entorno.
+
     """
+
     opts = Options()
 
-    if IS_RAILWAY:
+    is_docker = os.path.exists("/.dockerenv")
+
+    if IS_RAILWAY or is_docker:
+
         opts.add_argument("--headless=new")
+
         opts.add_argument("--no-sandbox")
+
         opts.add_argument("--disable-dev-shm-usage")
+
         opts.add_argument("--disable-gpu")
+
         opts.add_argument("--window-size=1920,1080")
+
     elif visible:
+
         opts.add_argument("--window-size=1920,1080")
+
     else:
+
         opts.add_argument("--window-position=-10000,-10000")
+
         opts.add_argument("--window-size=1920,1080")
 
     opts.add_argument("--disable-extensions")
+
     opts.add_argument("--disable-background-networking")
+
     opts.add_argument("--disable-default-apps")
+
     opts.add_argument("--disable-sync")
+
     opts.add_argument("--disable-translate")
+
     opts.add_argument("--metrics-recording-only")
+
     opts.add_argument("--mute-audio")
+
     opts.add_argument("--no-first-run")
+
     opts.add_argument("--safebrowsing-disable-auto-update")
+
     opts.add_argument("--ignore-certificate-errors")
+
     opts.add_argument(
+
         "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
     )
 
-    driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(PAGE_TIMEOUT)
-    driver.set_script_timeout(PAGE_TIMEOUT)
-    return driver
+    chrome_bin_candidates = [
 
+        "/usr/bin/chromium",
+
+        "/usr/bin/chromium-browser",
+
+        "/usr/bin/google-chrome",
+
+        "/usr/bin/google-chrome-stable",
+
+    ]
+
+    chromedriver_candidates = [
+
+        "/usr/bin/chromedriver",
+
+        "/usr/local/bin/chromedriver",
+
+    ]
+
+    chrome_binary = next(
+        (p for p in chrome_bin_candidates if os.path.exists(p)), None)
+
+    chromedriver_binary = next(
+        (p for p in chromedriver_candidates if os.path.exists(p)), None)
+
+    if chrome_binary:
+
+        opts.binary_location = chrome_binary
+
+    if not chromedriver_binary:
+
+        raise WebDriverException(
+
+            "chromedriver no encontrado. Revisar instalación en contenedor."
+
+        )
+
+    service = Service(executable_path=chromedriver_binary)
+
+    driver = webdriver.Chrome(service=service, options=opts)
+
+    driver.set_page_load_timeout(PAGE_TIMEOUT)
+
+    driver.set_script_timeout(PAGE_TIMEOUT)
+
+    return driver
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UTILIDADES
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def take_screenshot(driver: webdriver.Chrome, name: str, log: logging.Logger) -> str:
     """Guarda una captura de pantalla y retorna la ruta del archivo."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = now_local().strftime("%Y%m%d_%H%M%S")
     path = SCREENSHOTS_DIR / f"{ts}_{name}.png"
     driver.save_screenshot(str(path))
     log.info("  📸 Screenshot: %s", colorize(C.GRAY, str(path)))
@@ -317,7 +411,7 @@ def send_alert_email(subject: str, body: str, log: logging.Logger) -> bool:
         <pre style="background:#f8f9fa;padding:15px;border-radius:8px;
                     border-left:4px solid #c0392b;white-space:pre-wrap;">{body}</pre>
         <p style="color:#666;font-size:12px;">
-            Monitor automático — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            Monitor automático — {now_local().strftime('%Y-%m-%d %H:%M:%S %Z')}
         </p>
         </body></html>""",
         "html", "utf-8"
@@ -396,7 +490,7 @@ def check_maintenance(driver: webdriver.Chrome, log: logging.Logger) -> bool:
             return False
 
         # Si sí hay texto de mantenimiento, registrar incidencia
-        hora = datetime.now().strftime("%H:%M")
+        hora = now_local().strftime("%H:%M")
 
         matched = next(
             (marker for marker in maintenance_markers if marker in body_text),
@@ -441,7 +535,7 @@ def run_check(
         "incidence": False,
         "error": None,
         "screenshot": None,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now_local().isoformat(),
     }
 
     def pause(label: str = ""):
@@ -467,7 +561,7 @@ def run_check(
             if result["incidence"]:
                 result["error"] = (
                     f"Portal en mantenimiento en horario laboral "
-                    f"({datetime.now().strftime('%H:%M')})"
+                    f"({now_local().strftime('%H:%M')})"
                 )
 
         try:
@@ -531,8 +625,8 @@ def run_check(
             log.info("  │  Click en botón Predial: %s",
                      colorize(C.GRAY, "ContentPlaceHolder1_predial"))
             pause("Cargando módulo Predial")
-            # Validación mínima de que sí cambió la vista
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            WebDriverWait(driver, CLAVES_TIMEOUT).until(
+                lambda d: "predialTj" in d.current_url)
             log.info("  │  URL actual: %s", colorize(
                 C.GRAY, driver.current_url))
             step_ok("Predial cargado desde postback del portal", log)
@@ -555,10 +649,15 @@ def run_check(
         # Paso 3: Clave catastral
         step_header(3, "Seleccionar clave catastral YY000004", log)
         try:
-            wait.until(EC.presence_of_element_located(
-                (By.PARTIAL_LINK_TEXT, "Detalle")))
+            log.info("  │  Esperando tabla de claves catastrales (hasta %ss)...",
+                     colorize(C.GRAY, str(CLAVES_TIMEOUT)))
+            WebDriverWait(driver, CLAVES_TIMEOUT).until(
+                EC.presence_of_element_located(
+                    (By.PARTIAL_LINK_TEXT, "Detalle"))
+            )
             rows = driver.find_elements(By.TAG_NAME, "tr")
             detalle_link = None
+
             for row in rows:
                 if "YY000004" in row.text:
                     try:
@@ -577,11 +676,14 @@ def run_check(
                 return result
 
             detalle_link.click()
+
             log.info("  │  Click en Detalle de YY000004")
 
         except TimeoutException:
-            step_fail("Timeout esperando tabla de claves catastrales", log)
-            result["error"] = "Timeout en tabla de claves"
+
+            step_fail(
+                f"Timeout esperando tabla de claves catastrales ({CLAVES_TIMEOUT}s)", log)
+            result["error"] = f"Timeout en tabla de claves ({CLAVES_TIMEOUT}s)"
             result["screenshot"] = take_screenshot(
                 driver, "claves_timeout", log)
             return result
@@ -762,7 +864,7 @@ def run_check(
 
 def process_result(result: dict, log: logging.Logger):
     """Procesa el resultado: loguea éxito o envía alerta."""
-    ts = result.get("timestamp", datetime.now().isoformat())
+    ts = result.get("timestamp", now_local().isoformat())
     print()
 
     if result.get("incidence"):
@@ -839,7 +941,7 @@ def main():
                         help="Pausa entre pasos en segundos (default: 2)")
     args = parser.parse_args()
 
-    show_browser = args.visible and not IS_RAILWAY
+    show_browser = args.visible and not IS_RAILWAY and not IS_DOCKER
 
     print(colorize(C.CYAN + C.BOLD,
                    "\n━━━ Monitor de Pasarela de Pago — Predial Tijuana ━━━━━━━━━━━━━"))
@@ -900,7 +1002,7 @@ def main():
                 )
 
             next_ts = datetime.fromtimestamp(
-                time.time() + interval).strftime("%H:%M:%S")
+                time.time() + interval, TZ).strftime("%H:%M:%S")
             log.info("\n  Próxima ejecución a las %s (%ds — %s)",
                      colorize(C.CYAN, next_ts), interval,
                      "horario laboral" if is_business_hours() else "fuera de horario")
