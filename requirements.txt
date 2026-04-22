@@ -1,0 +1,5 @@
+# Monitor de Pasarela de Pago - Dependencias
+# Instalar con: pip install -r requirements.txt
+
+selenium>=4.20.0
+python-dotenv>=1.0.0

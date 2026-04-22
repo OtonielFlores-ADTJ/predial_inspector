@@ -1,0 +1,10 @@
+services:
+  monitor:
+    build: .
+    container_name: monitor-pasarela-tijuana
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./predial:/app/predial
+    command: ["python3", "monitor.py", "--loop", "--interval", "600"]

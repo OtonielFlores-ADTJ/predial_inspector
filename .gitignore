@@ -1,0 +1,24 @@
+# Secretos
+.env
+
+# Entorno virtual
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Archivos generados
+predial/
+monitor.log
+*.log
+
+# VSCode
+.vscode/*.code-workspace
+
+# Credenciales viejas
+credentials/
+*.json
+
+# macOS
+.DS_Store
