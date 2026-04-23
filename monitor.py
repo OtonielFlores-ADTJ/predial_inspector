@@ -116,6 +116,10 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 ALERT_TO = os.getenv("ALERT_TO", "")
+ALERT_TO_CRITICAL = [
+    "kperez@tijuana.gob.mx",
+    "gehernandez@tijuana.gob.mx"
+]
 ALERT_FROM = os.getenv("ALERT_FROM", SMTP_USER)
 
 EXPECTED_GATEWAY_DOMAIN = os.getenv(
@@ -384,11 +388,21 @@ def send_alert_email(
         border_color = "#d6b656"
         footer_color = "#777777"
 
-    if not ALERT_TO.strip():
-        recipients = []
+    normal_recipients = [email.strip()
+                         for email in ALERT_TO.split(",") if email.strip()]
+    critical_recipients = [email.strip()
+                           for email in ALERT_TO_CRITICAL if email.strip()]
+
+    if severity == "critical":
+        recipients = list(dict.fromkeys(
+            normal_recipients + critical_recipients))
     else:
-        recipients = [email.strip()
-                      for email in ALERT_TO.split(",") if email.strip()]
+        recipients = normal_recipients
+
+    if not recipients:
+        log.warning(
+            "No hay destinatarios configurados para este tipo de alerta")
+        return False
 
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
