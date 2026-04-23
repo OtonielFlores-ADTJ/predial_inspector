@@ -806,7 +806,7 @@ def run_check(
 
         log.info("  │  URL detectada    : %s", colorize(C.WHITE, current_url))
         log.info("  │  Dominio detectado: %s",
-                 colorize(C.WHITE, gateway_domain))
+                 colorize(C.WHITE, current_url))
         log.info("  │  Dominio esperado : %s", colorize(
             C.GREEN, EXPECTED_GATEWAY_DOMAIN))
 
@@ -835,48 +835,28 @@ def run_check(
         step_header(7, "Cerrar sesión", log)
 
         try:
-
             try:
-
                 driver.find_element(By.ID, "regresar").click()
-
                 pause("Regresando")
-
             except NoSuchElementException:
-
                 try:
-
                     driver.back()
-
                     time.sleep(1)
-
                     driver.back()
-
                 except WebDriverException:
-
                     pass
-
             try:
-
                 driver.find_element(By.PARTIAL_LINK_TEXT,
                                     "Cerrar Sesi").click()
-
                 step_ok("Sesión cerrada", log)
-
             except NoSuchElementException:
-
                 step_skip(
                     "Enlace de cierre de sesión no encontrado — no crítico", log)
-
             except WebDriverException as exc:
-
                 step_skip(f"Logout no completado — no crítico: {exc}", log)
-
         except WebDriverException as exc:
-
             step_skip(
                 f"Error de WebDriver durante logout — no crítico: {exc}", log)
-
         result["step"] = "completed"
 
     except WebDriverException as exc:
