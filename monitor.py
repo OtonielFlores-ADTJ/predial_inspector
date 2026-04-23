@@ -33,6 +33,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
 from pathlib import Path
+from email.mime.base import MIMEBase
+from email import encoders
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -272,25 +274,16 @@ def print_config_summary(log: logging.Logger):
 
 def create_driver(visible: bool = False) -> webdriver.Chrome:
     """
-
     Crea ChromeDriver adaptado al entorno.
-
     """
-
     opts = Options()
-
     is_docker = os.path.exists("/.dockerenv")
 
     if IS_RAILWAY or is_docker:
-
         opts.add_argument("--headless=new")
-
         opts.add_argument("--no-sandbox")
-
         opts.add_argument("--disable-dev-shm-usage")
-
         opts.add_argument("--disable-gpu")
-
         opts.add_argument("--window-size=1920,1080")
 
     elif visible:
@@ -300,83 +293,53 @@ def create_driver(visible: bool = False) -> webdriver.Chrome:
     else:
 
         opts.add_argument("--window-position=-10000,-10000")
-
         opts.add_argument("--window-size=1920,1080")
 
     opts.add_argument("--disable-extensions")
-
     opts.add_argument("--disable-background-networking")
-
     opts.add_argument("--disable-default-apps")
-
     opts.add_argument("--disable-sync")
-
     opts.add_argument("--disable-translate")
-
     opts.add_argument("--metrics-recording-only")
-
     opts.add_argument("--mute-audio")
-
     opts.add_argument("--no-first-run")
-
     opts.add_argument("--safebrowsing-disable-auto-update")
-
     opts.add_argument("--ignore-certificate-errors")
-
     opts.add_argument(
-
-        "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
     )
-
     chrome_bin_candidates = [
-
         "/usr/bin/chromium",
-
         "/usr/bin/chromium-browser",
-
         "/usr/bin/google-chrome",
-
         "/usr/bin/google-chrome-stable",
-
     ]
 
     chromedriver_candidates = [
-
         "/usr/bin/chromedriver",
-
         "/usr/local/bin/chromedriver",
-
     ]
 
     chrome_binary = next(
         (p for p in chrome_bin_candidates if os.path.exists(p)), None)
-
     chromedriver_binary = next(
         (p for p in chromedriver_candidates if os.path.exists(p)), None)
 
     if chrome_binary:
-
         opts.binary_location = chrome_binary
 
     if not chromedriver_binary:
 
         raise WebDriverException(
-
             "chromedriver no encontrado. Revisar instalación en contenedor."
-
         )
 
     service = Service(executable_path=chromedriver_binary)
-
     driver = webdriver.Chrome(service=service, options=opts)
-
     driver.set_page_load_timeout(PAGE_TIMEOUT)
-
     driver.set_script_timeout(PAGE_TIMEOUT)
-
     return driver
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -393,19 +356,20 @@ def take_screenshot(driver: webdriver.Chrome, name: str, log: logging.Logger) ->
     return str(path)
 
 
-def send_alert_email(subject: str, body: str, log: logging.Logger) -> bool:
-    """Envía un correo de alerta vía SMTP."""
+def send_alert_email(subject: str, body: str, log: logging.Logger, screenshot_path: str = None) -> bool:
+    """Envía un correo de alerta vía SMTP y adjunta screenshot si existe."""
     if not all([SMTP_USER, SMTP_PASS, ALERT_TO]):
         log.warning("SMTP no configurado — alerta solo en consola/log")
         return False
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = ALERT_FROM
     msg["To"] = ALERT_TO
 
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-    msg.attach(MIMEText(
+    alt_part = MIMEMultipart("alternative")
+    alt_part.attach(MIMEText(body, "plain", "utf-8"))
+    alt_part.attach(MIMEText(
         f"""<html><body style="font-family:Arial,sans-serif;padding:20px;">
         <h2 style="color:#c0392b;">⚠️ Alerta de Pasarela de Pago</h2>
         <pre style="background:#f8f9fa;padding:15px;border-radius:8px;
@@ -416,6 +380,21 @@ def send_alert_email(subject: str, body: str, log: logging.Logger) -> bool:
         </body></html>""",
         "html", "utf-8"
     ))
+    msg.attach(alt_part)
+
+    if screenshot_path and Path(screenshot_path).exists():
+        try:
+            with open(screenshot_path, "rb") as file:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(file.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                f'attachment; filename="{Path(screenshot_path).name}"'
+            )
+            msg.attach(part)
+        except OSError as exc:
+            log.warning("No se pudo adjuntar screenshot al correo: %s", exc)
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
@@ -434,6 +413,7 @@ def send_alert_email(subject: str, body: str, log: logging.Logger) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 # HELPERS VISUALES DE PASOS
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def step_header(num, desc: str, log: logging.Logger):
     """Imprime el encabezado de un paso del flujo."""
@@ -743,7 +723,8 @@ def run_check(
         log.info("  │  Dominio esperado : %s", colorize(
             C.GREEN, EXPECTED_GATEWAY_DOMAIN))
 
-        take_screenshot(driver, "gateway_evidencia", log)
+        result["screenshot"] = take_screenshot(
+            driver, "gateway_evidencia", log)
 
         if EXPECTED_GATEWAY_DOMAIN.lower() in gateway_domain:
             result["domain_match"] = True
@@ -881,6 +862,7 @@ def process_result(result: dict, log: logging.Logger):
                 "El monitor continuará verificando el flujo de pago."
             ),
             log=log,
+            screenshot_path=result.get("screenshot"),
         )
 
     if result["ok"]:
@@ -911,6 +893,7 @@ def process_result(result: dict, log: logging.Logger):
         "🚨 ALERTA: Pasarela de Pago Tijuana — Anomalía Detectada",
         body,
         log=log,
+        screenshot_path=result.get("screenshot"),
     )
 
 
