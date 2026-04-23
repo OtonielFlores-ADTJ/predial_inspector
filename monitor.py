@@ -356,28 +356,66 @@ def take_screenshot(driver: webdriver.Chrome, name: str, log: logging.Logger) ->
     return str(path)
 
 
-def send_alert_email(subject: str, body: str, log: logging.Logger, screenshot_path: str = None) -> bool:
+def send_alert_email(
+    subject: str,
+    body: str,
+    log: logging.Logger,
+    screenshot_path: str = None,
+    severity: str = "warning",
+) -> bool:
     """Envía un correo de alerta vía SMTP y adjunta screenshot si existe."""
+
     if not all([SMTP_USER, SMTP_PASS, ALERT_TO]):
         log.warning("SMTP no configurado — alerta solo en consola/log")
         return False
 
+    severity = (severity or "warning").lower()
+
+    if severity == "critical":
+        title = "🚨 Alerta crítica de Predial"
+        title_color = "#c0392b"
+        box_bg = "#fff5f5"
+        border_color = "#c0392b"
+        footer_color = "#666666"
+    else:
+        title = "⚠️ Aviso del Monitor de Predial"
+        title_color = "#8a6d3b"
+        box_bg = "#fffaf0"
+        border_color = "#d6b656"
+        footer_color = "#777777"
+
+    if not ALERT_TO.strip():
+        recipients = []
+    else:
+        recipients = [email.strip()
+                      for email in ALERT_TO.split(",") if email.strip()]
+
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = ALERT_FROM
-    msg["To"] = ALERT_TO
+    msg["To"] = ", ".join(recipients)
 
     alt_part = MIMEMultipart("alternative")
     alt_part.attach(MIMEText(body, "plain", "utf-8"))
     alt_part.attach(MIMEText(
-        f"""<html><body style="font-family:Arial,sans-serif;padding:20px;">
-        <h2 style="color:#c0392b;">⚠️ Alerta de Pasarela de Pago</h2>
-        <pre style="background:#f8f9fa;padding:15px;border-radius:8px;
-                    border-left:4px solid #c0392b;white-space:pre-wrap;">{body}</pre>
-        <p style="color:#666;font-size:12px;">
-            Monitor automático — {now_local().strftime('%Y-%m-%d %H:%M:%S %Z')}
-        </p>
-        </body></html>""",
+        f"""<html>
+        <body style="font-family:Arial,sans-serif;padding:20px;background:#ffffff;">
+            <h2 style="color:{title_color};margin-bottom:16px;">{title}</h2>
+            <div style="
+                background:{box_bg};
+                padding:15px;
+                border-radius:8px;
+                border-left:4px solid {border_color};
+                white-space:pre-wrap;
+                font-family:Consolas,Monaco,monospace;
+                line-height:1.45;
+                color:#222;
+            ">{body}</div>
+            <p style="color:{footer_color};font-size:12px;margin-top:18px;">
+                Monitor automático — {now_local().strftime('%Y-%m-%d %H:%M:%S %Z')}
+            </p>
+        </body>
+        </html>""",
         "html", "utf-8"
     ))
     msg.attach(alt_part)
@@ -402,7 +440,7 @@ def send_alert_email(subject: str, body: str, log: logging.Logger, screenshot_pa
             server.starttls()
             server.ehlo()
             server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(ALERT_FROM, ALERT_TO.split(","), msg.as_string())
+            server.sendmail(ALERT_FROM, recipients, msg.as_string())
         log.info("  ✉️  Alerta enviada a %s", colorize(C.GREEN, ALERT_TO))
         return True
     except smtplib.SMTPException as exc:
@@ -511,6 +549,7 @@ def run_check(
         "gateway_url": "",
         "gateway_domain": "",
         "domain_match": False,
+        "redirect_mismatch": False,
         "maintenance": False,
         "incidence": False,
         "error": None,
@@ -732,6 +771,7 @@ def run_check(
             step_ok("PASARELA LEGÍTIMA — %s" % colorize(
                 C.GREEN + C.BOLD, gateway_domain), log)
         else:
+            result["redirect_mismatch"] = True
             result["error"] = (
                 f"DOMINIO SUPLANTADO | "
                 f"esperado: {EXPECTED_GATEWAY_DOMAIN} | "
@@ -844,40 +884,70 @@ def run_check(
 
 
 def process_result(result: dict, log: logging.Logger):
-    """Procesa el resultado: loguea éxito o envía alerta."""
+    """Procesa el resultado: éxito, warning o alerta crítica."""
     ts = result.get("timestamp", now_local().isoformat())
     print()
 
+    # 1. Warning por mantenimiento en horario laboral
     if result.get("incidence"):
         log.warning(colorize(
             C.BG_YELLOW + C.BOLD,
             "  ⚠️   INCIDENCIA: Portal en mantenimiento en horario laboral  "
         ))
         send_alert_email(
-            "⚠️ INCIDENCIA: Portal Predial Tijuana en mantenimiento (horario laboral)",
+            "⚠️ WARNING: Portal Predial Tijuana en mantenimiento (horario laboral)",
             (
+                f"Nivel      : WARNING\n"
                 f"Fecha/Hora : {ts}\n"
                 f"Horario    : Lun-Vie {BUSINESS_HOUR_START:02d}:00–{BUSINESS_HOUR_END:02d}:00\n"
-                f"Detalle    : {result.get('error', 'Portal en mantenimiento')}\n\n"
-                "El monitor continuará verificando el flujo de pago."
+                f"Detalle    : {result.get('error', 'Portal en mantenimiento')}\n"
             ),
             log=log,
             screenshot_path=result.get("screenshot"),
+            severity="warning",
         )
 
+    # 2. Éxito
     if result["ok"]:
         log.info(colorize(C.BG_GREEN + C.BOLD, "  ✅  VERIFICACIÓN EXITOSA  "))
         log.info("  Pasarela : %s", colorize(
             C.GREEN, result["gateway_domain"]))
         if result.get("maintenance"):
             log.info("  Nota     : %s",
-                     colorize(C.GRAY, "Portal en mantenimiento fuera de horario (esperado)"))
+                     colorize(C.GRAY, "Portal en mantenimiento detectado durante la ejecución"))
         log.info("  Hora     : %s", colorize(C.GRAY, ts))
         return
 
-    log.critical(colorize(C.BG_RED + C.BOLD,
-                          "  🚨  ANOMALÍA DETECTADA — SE ENVÍA ALERTA  "))
+    # 3. CRÍTICO solo si hay redirección a dominio distinto
+    if result.get("redirect_mismatch"):
+        log.critical(colorize(C.BG_RED + C.BOLD,
+                              "  🚨  ALERTA CRÍTICA: REDIRECCIÓN A DOMINIO NO ESPERADO  "))
+        body = (
+            f"Nivel                : CRITICAL\n"
+            f"Fecha/Hora           : {ts}\n"
+            f"Último paso          : {result['step']}\n"
+            f"Dominio esperado     : {EXPECTED_GATEWAY_DOMAIN}\n"
+            f"Dominio detectado    : {result.get('gateway_domain', 'N/A')}\n"
+            f"URL completa         : {result.get('gateway_url', 'N/A')}\n"
+            f"Coincidencia dominio : {result.get('domain_match', False)}\n"
+            f"\nDetalle del error:\n{result.get('error', 'Sin detalle')}\n"
+            f"\nScreenshot           : {result.get('screenshot', 'N/A')}\n"
+        )
+        log.critical(body)
+        send_alert_email(
+            "🚨 CRITICAL: Pasarela de Pago Tijuana — Dominio no esperado detectado",
+            body,
+            log=log,
+            screenshot_path=result.get("screenshot"),
+            severity="critical",
+        )
+        return
+
+    # 4. Todo lo demás = WARNING operativo
+    log.warning(colorize(C.BG_YELLOW + C.BOLD,
+                         "  ⚠️  WARNING: INCIDENCIA OPERATIVA DEL MONITOR  "))
     body = (
+        f"Nivel                : WARNING\n"
         f"Fecha/Hora           : {ts}\n"
         f"Último paso          : {result['step']}\n"
         f"Dominio esperado     : {EXPECTED_GATEWAY_DOMAIN}\n"
@@ -888,18 +958,20 @@ def process_result(result: dict, log: logging.Logger):
         f"\nDetalle del error:\n{result.get('error', 'Sin detalle')}\n"
         f"\nScreenshot           : {result.get('screenshot', 'N/A')}\n"
     )
-    log.critical(body)
+    log.warning(body)
     send_alert_email(
-        "🚨 ALERTA: Pasarela de Pago Tijuana — Anomalía Detectada",
+        "⚠️ WARNING: Monitor Predial Tijuana — incidencia operativa",
         body,
         log=log,
         screenshot_path=result.get("screenshot"),
+        severity="warning",
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def main():
     """Punto de entrada del monitor."""
@@ -979,9 +1051,10 @@ def main():
             except Exception as exc:  # pylint: disable=broad-except
                 log.error("Error inesperado en ciclo: %s", exc)
                 send_alert_email(
-                    "🚨 Error crítico en monitor de pasarela",
+                    "⚠️ WARNING: Error operativo en monitor de pasarela",
                     traceback.format_exc(),
                     log=log,
+                    severity="warning",
                 )
 
             next_ts = datetime.fromtimestamp(
