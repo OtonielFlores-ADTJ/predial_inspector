@@ -544,10 +544,38 @@ def check_maintenance(driver: webdriver.Chrome, log: logging.Logger) -> bool:
     except NoSuchElementException:
         return False
 
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPER DE ESPERA DE CARGA DE PREDIAL
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def wait_predial_loaded(driver: webdriver.Chrome, timeout: int) -> None:
+    """Espera a que la vista de Predial cargue usando señales del contenido."""
+    wait = WebDriverWait(driver, timeout)
+    wait.until(
+        EC.any_of(
+            EC.presence_of_element_located(
+                (By.XPATH,
+                 "//*[contains(normalize-space(.), 'Claves Catastrales Registradas')]")
+            ),
+            EC.presence_of_element_located(
+                (By.XPATH,
+                 "//*[contains(normalize-space(.), 'Clave Catastral')]")
+            ),
+            EC.presence_of_element_located(
+                (By.XPATH, "//*[contains(normalize-space(.), 'YY000004')]")
+            ),
+            EC.presence_of_element_located(
+                (By.XPATH, "//*[contains(normalize-space(.), 'Detalle')]")
+            ),
+        )
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VERIFICACIÓN PRINCIPAL
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def run_check(
     visible: bool = False,
@@ -639,44 +667,50 @@ def run_check(
         step_ok("Login exitoso", log)
         result["step"] = "logged_in"
 
-        # Paso 2: Predial
-        # ── Paso 2: Predial — OBLIGATORIO por click real ────────────────────
-
+        # Paso 2: Clic en trámite predial
         step_header(2, "Entrar a Predial desde el botón real del portal", log)
-
         try:
-
             predial_btn = wait.until(
-                EC.presence_of_element_located(
-                    (By.ID, "ContentPlaceHolder1_predial")
-                )
+                EC.element_to_be_clickable(
+                    (By.ID, "ContentPlaceHolder1_predial"))
             )
-
-            # Esperar a que exista y hacer click vía JS por ser input type=image
-
-            driver.execute_script("arguments[0].click();", predial_btn)
-            log.info("  │  Click en botón Predial: %s",
-                     colorize(C.GRAY, "ContentPlaceHolder1_predial"))
-            pause("Cargando módulo Predial")
-            WebDriverWait(driver, CLAVES_TIMEOUT).until(
-                lambda d: "predialTj" in d.current_url)
-            log.info("  │  URL actual: %s", colorize(
-                C.GRAY, driver.current_url))
-            step_ok("Predial cargado desde postback del portal", log)
-            result["step"] = "predial_page"
-
         except TimeoutException:
-            step_fail("Botón de Predial no encontrado o no respondió", log)
-            result["error"] = "Botón de Predial no encontrado o no respondió"
+            step_fail("Botón de Predial no encontrado", log)
+            result["error"] = "Botón de Predial no encontrado"
             result["screenshot"] = take_screenshot(
                 driver, "predial_btn_not_found", log)
             return result
-
         except NoSuchElementException:
             step_fail("Elemento de Predial no encontrado", log)
             result["error"] = "Elemento de Predial no encontrado"
             result["screenshot"] = take_screenshot(
                 driver, "predial_not_found", log)
+            return result
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", predial_btn)
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", predial_btn)
+            log.info("  │  Click en botón Predial: %s",
+                     colorize(C.GRAY, "ContentPlaceHolder1_predial"))
+            pause("Cargando módulo Predial")
+            wait_predial_loaded(driver, CLAVES_TIMEOUT)
+            log.info("  │  URL actual: %s", colorize(
+                C.GRAY, driver.current_url))
+            log.info("  │  Vista Predial detectada por contenido")
+            step_ok("Predial cargado desde postback del portal", log)
+            result["step"] = "predial_page"
+        except TimeoutException:
+            step_fail("La vista de Predial no terminó de cargar", log)
+            result["error"] = "La vista de Predial no terminó de cargar"
+            result["screenshot"] = take_screenshot(
+                driver, "predial_view_timeout", log)
+            return result
+        except WebDriverException as exc:
+            step_fail(f"Error al hacer click o cargar Predial: {exc}", log)
+            result["error"] = f"Error al hacer click o cargar Predial: {exc}"
+            result["screenshot"] = take_screenshot(
+                driver, "predial_click_error", log)
             return result
 
         # Paso 3: Clave catastral
@@ -1005,7 +1039,7 @@ def main():
     parser.add_argument("--interval", type=int, default=0,
                         help="Forzar intervalo fijo en segundos (ignora horario)")
     parser.add_argument("--visible", action="store_true",
-                        help="Mostrar ventana del navegador (solo local, no Railway)")
+                        help="Mostrar ventana del navegador (solo local, no Docker/Railway)")
     parser.add_argument("--step-delay", dest="step_delay", type=int, default=2,
                         help="Pausa entre pasos en segundos (default: 2)")
     args = parser.parse_args()
