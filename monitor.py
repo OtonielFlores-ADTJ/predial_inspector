@@ -27,16 +27,20 @@ import logging
 import smtplib
 import argparse
 import traceback
+import subprocess
+import uuid
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
 from pathlib import Path
-from email.mime.base import MIMEBase
-from email import encoders
 
-from selenium import webdriver
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from selenium.webdriver import Chrome
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -177,6 +181,40 @@ class TijuanaFileFormatter(logging.Formatter):
         return dt.isoformat()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CLEANUP DE PROCESOS CHROME/CHROMEDRIVER
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def cleanup_chrome_processes(log: logging.Logger = None):
+    """Mata procesos Chrome/Chromedriver huérfanos antes de crear una sesión nueva."""
+
+    try:
+
+        subprocess.run(
+
+            ["pkill", "-f", "chromium|chrome|chromedriver"],
+
+            stdout=subprocess.DEVNULL,
+
+            stderr=subprocess.DEVNULL,
+
+            timeout=5,
+
+            check=False,
+
+        )
+
+        if log:
+
+            log.info("  🧹 Limpieza de procesos Chrome/Chromedriver completada")
+
+    except Exception as exc:  # pylint: disable=broad-except
+
+        if log:
+
+            log.warning("  ⚠️ No se pudo limpiar Chrome/Chromedriver: %s", exc)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # LOGGER
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -276,19 +314,37 @@ def print_config_summary(log: logging.Logger):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def create_driver(visible: bool = False) -> webdriver.Chrome:
-    """
-    Crea ChromeDriver adaptado al entorno.
-    """
+def create_driver(visible: bool = False, log: logging.Logger = None) -> Chrome:
+    """Crea ChromeDriver adaptado a Docker/Railway con perfil limpio por ejecución."""
+
+    cleanup_chrome_processes(log)
+
     opts = Options()
+
     is_docker = os.path.exists("/.dockerenv")
 
     if IS_RAILWAY or is_docker:
+
         opts.add_argument("--headless=new")
+
         opts.add_argument("--no-sandbox")
+
         opts.add_argument("--disable-dev-shm-usage")
+
         opts.add_argument("--disable-gpu")
+
+        opts.add_argument("--disable-software-rasterizer")
+
         opts.add_argument("--window-size=1920,1080")
+
+        opts.add_argument("--remote-debugging-port=0")
+
+        opts.add_argument(
+            f"--user-data-dir=/tmp/chrome-user-data-{uuid.uuid4()}")
+
+        opts.add_argument(f"--data-path=/tmp/chrome-data-{uuid.uuid4()}")
+
+        opts.add_argument(f"--disk-cache-dir=/tmp/chrome-cache-{uuid.uuid4()}")
 
     elif visible:
 
@@ -297,67 +353,94 @@ def create_driver(visible: bool = False) -> webdriver.Chrome:
     else:
 
         opts.add_argument("--window-position=-10000,-10000")
+
         opts.add_argument("--window-size=1920,1080")
 
     opts.add_argument("--disable-extensions")
+
     opts.add_argument("--disable-background-networking")
+
     opts.add_argument("--disable-default-apps")
+
     opts.add_argument("--disable-sync")
+
     opts.add_argument("--disable-translate")
+
     opts.add_argument("--metrics-recording-only")
+
     opts.add_argument("--mute-audio")
+
     opts.add_argument("--no-first-run")
+
     opts.add_argument("--safebrowsing-disable-auto-update")
+
     opts.add_argument("--ignore-certificate-errors")
+
     opts.add_argument(
+
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+
         "AppleWebKit/537.36 (KHTML, like Gecko) "
+
         "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
+
     )
-    chrome_bin_candidates = [
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-    ]
 
-    chromedriver_candidates = [
-        "/usr/bin/chromedriver",
-        "/usr/local/bin/chromedriver",
-    ]
+    chrome_binary = os.getenv("CHROME_BIN", "/usr/bin/chromium")
 
-    chrome_binary = next(
-        (p for p in chrome_bin_candidates if os.path.exists(p)), None)
-    chromedriver_binary = next(
-        (p for p in chromedriver_candidates if os.path.exists(p)), None)
+    chromedriver_binary = os.getenv(
+        "CHROMEDRIVER_BIN", "/usr/bin/chromedriver")
 
-    if chrome_binary:
-        opts.binary_location = chrome_binary
-
-    if not chromedriver_binary:
+    if not os.path.exists(chrome_binary):
 
         raise WebDriverException(
-            "chromedriver no encontrado. Revisar instalación en contenedor."
-        )
+            f"Chrome/Chromium no encontrado: {chrome_binary}")
+
+    if not os.path.exists(chromedriver_binary):
+
+        raise WebDriverException(
+            f"chromedriver no encontrado: {chromedriver_binary}")
+
+    opts.binary_location = chrome_binary
 
     service = Service(executable_path=chromedriver_binary)
-    driver = webdriver.Chrome(service=service, options=opts)
+
+    driver = Chrome(
+        service=service, options=opts)  # pylint: disable=not-callable  # pylint: disable=not-callable
+
     driver.set_page_load_timeout(PAGE_TIMEOUT)
+
     driver.set_script_timeout(PAGE_TIMEOUT)
+
     return driver
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UTILIDADES
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def take_screenshot(driver: webdriver.Chrome, name: str, log: logging.Logger) -> str:
-    """Guarda una captura de pantalla y retorna la ruta del archivo."""
+def take_screenshot(driver: Chrome, name: str, log: logging.Logger) -> str:
+    """Guarda una captura sin romper el flujo si Chrome ya murió."""
     ts = now_local().strftime("%Y%m%d_%H%M%S")
     path = SCREENSHOTS_DIR / f"{ts}_{name}.png"
-    driver.save_screenshot(str(path))
-    log.info("  📸 Screenshot: %s", colorize(C.GRAY, str(path)))
-    return str(path)
+    try:
+        driver.save_screenshot(str(path))
+        log.info("  📸 Screenshot: %s", colorize(C.GRAY, str(path)))
+        return str(path)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning("  ⚠️ No se pudo tomar screenshot: %s", exc)
+        return ""
+
+
+def safe_current_url(driver: Chrome, log: logging.Logger = None) -> str:
+    """Obtiene current_url sin romper si WebDriver está colgado o murió."""
+    try:
+        return driver.current_url
+    except Exception as exc:  # pylint: disable=broad-except
+        if log:
+            log.warning("  ⚠️ No se pudo obtener URL actual: %s", exc)
+        return ""
 
 
 def send_alert_email(
@@ -496,7 +579,7 @@ def step_fail(msg: str, log: logging.Logger):
 # DETECCIÓN DE MANTENIMIENTO
 # ──────────────────────────────────────────────────────────────────────────────
 
-def check_maintenance(driver: webdriver.Chrome, log: logging.Logger) -> bool:
+def check_maintenance(driver: Chrome, log: logging.Logger) -> bool:
     """
     Detecta mantenimiento del portal.
 
@@ -549,7 +632,7 @@ def check_maintenance(driver: webdriver.Chrome, log: logging.Logger) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def wait_predial_loaded(driver: webdriver.Chrome, timeout: int) -> None:
+def wait_predial_loaded(driver: Chrome, timeout: int) -> None:
     """Espera a que la vista de Predial cargue usando señales del contenido."""
     wait = WebDriverWait(driver, timeout)
     wait.until(
@@ -608,7 +691,7 @@ def run_check(
     try:
         # Paso 1: Login
         step_header(1, "Login en el portal", log)
-        driver = create_driver(visible=visible)
+        driver = create_driver(visible=visible, log=log)
         wait = WebDriverWait(driver, PAGE_TIMEOUT)
 
         driver.get(URL_LOGIN)
@@ -798,37 +881,53 @@ def run_check(
 
         # Paso 6: Verificar dominio
         step_header(6, "Verificar dominio de la pasarela", log)
-        current_url = driver.current_url
+
+        try:
+            WebDriverWait(driver, 25).until(
+                lambda d: EXPECTED_GATEWAY_DOMAIN.lower() in safe_current_url(d).lower()
+                or safe_current_url(d).startswith("http")
+            )
+        except TimeoutException:
+            log.warning(
+                "  ⚠️ Timeout esperando URL de pasarela; se usará la URL disponible")
+
+        current_url = safe_current_url(driver, log)
         parsed = urlparse(current_url)
         gateway_domain = parsed.netloc.lower()
+
         result["gateway_url"] = current_url
         result["gateway_domain"] = gateway_domain
 
-        log.info("  │  URL detectada    : %s", colorize(C.WHITE, current_url))
-        log.info("  │  Dominio detectado: %s",
-                 colorize(C.WHITE, current_url))
+        log.info("  │  URL detectada    : %s",
+                 colorize(C.WHITE, current_url or "N/A"))
+        log.info("  │  Dominio detectado: %s", colorize(
+            C.WHITE, gateway_domain or "N/A"))
         log.info("  │  Dominio esperado : %s", colorize(
             C.GREEN, EXPECTED_GATEWAY_DOMAIN))
 
         result["screenshot"] = take_screenshot(
             driver, "gateway_evidencia", log)
 
-        if EXPECTED_GATEWAY_DOMAIN.lower() in gateway_domain:
+        if gateway_domain and EXPECTED_GATEWAY_DOMAIN.lower() in gateway_domain:
             result["domain_match"] = True
             result["ok"] = True
             step_ok("PASARELA LEGÍTIMA — %s" % colorize(
                 C.GREEN + C.BOLD, gateway_domain), log)
         else:
-            result["redirect_mismatch"] = True
+            result["redirect_mismatch"] = bool(gateway_domain)
             result["error"] = (
-                f"DOMINIO SUPLANTADO | "
+                f"DOMINIO NO VALIDADO | "
                 f"esperado: {EXPECTED_GATEWAY_DOMAIN} | "
-                f"detectado: {gateway_domain} | "
-                f"url: {current_url}"
+                f"detectado: {gateway_domain or 'N/A'} | "
+                f"url: {current_url or 'N/A'}"
             )
-            result["screenshot"] = take_screenshot(
-                driver, "ALERTA_SUPLANTACION", log)
-            step_fail(result["error"], log)
+
+            if gateway_domain:
+                result["screenshot"] = take_screenshot(
+                    driver, "ALERTA_SUPLANTACION", log)
+                step_fail(result["error"])
+            else:
+                step_warn(result["error"], log)
 
         # Paso 7: Logout
 
