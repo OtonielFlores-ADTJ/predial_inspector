@@ -120,10 +120,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 ALERT_TO = os.getenv("ALERT_TO", "")
-ALERT_TO_CRITICAL = [
-    "kperez@tijuana.gob.mx",
-    "gehernandez@tijuana.gob.mx"
-]
+ALERT_TO_CRITICAL = []
 ALERT_FROM = os.getenv("ALERT_FROM", SMTP_USER)
 
 EXPECTED_GATEWAY_DOMAIN = os.getenv(
