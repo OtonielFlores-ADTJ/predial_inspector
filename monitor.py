@@ -1141,5 +1141,6 @@ def main():
         sys.exit(0 if result["ok"] else 1)
 
 
+# Comentario ajuste
 if __name__ == "__main__":
     main()
